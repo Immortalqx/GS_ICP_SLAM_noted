@@ -61,6 +61,9 @@ class GaussianModel(nn.Module):
         self.keyframe_idx = torch.empty(0)
         self.trackable_mask = torch.empty(0)
 
+        # 新增一个mask用来过滤冗余高斯
+        self._mask = torch.empty(0)
+
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
@@ -156,6 +159,9 @@ class GaussianModel(nn.Module):
         self.trackable_mask = torch.zeros((self.get_xyz.shape[0]), dtype=torch.bool, device="cuda")
         self.trackable_mask[(trackable_idxs)] = 1
 
+        # 初始化learnable mask
+        self._mask = nn.Parameter(torch.ones((fused_point_cloud.shape[0], 1), device="cuda").requires_grad_(True))
+
         self.keyframe_idx = torch.ones((self.get_xyz.shape[0], 1), dtype=torch.bool, device="cuda")
 
         torch.cuda.empty_cache()
@@ -176,6 +182,8 @@ class GaussianModel(nn.Module):
         rots = rots_
 
         opacities = inverse_sigmoid(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+
+        # self.new_xxx，太容易出错了，这个作者写代码不规范啊
         self.new_xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self.new_features_dc = nn.Parameter(features[:, :, 0:1].transpose(1, 2).contiguous().requires_grad_(True))
         self.new_features_rest = nn.Parameter(features[:, :, 1:].transpose(1, 2).contiguous().requires_grad_(True))
@@ -189,9 +197,12 @@ class GaussianModel(nn.Module):
             self.new_trackable_mask[(trackable_idxs)] = 1
 
         # self.trackable_mask = torch.concat([self.trackable_mask, self.new_trackable_mask], dim=0)
+        # FIXME 这里如何更新self._mask呢？我认为最简单的就是让这部分的mask都为1，新增加的点还不急着mask掉
+        self.new_mask = nn.Parameter(torch.ones((fused_point_cloud.shape[0], 1), device="cuda").requires_grad_(True))
+
         self.densification_postfix(self.new_xyz, self.new_features_dc,
                                    self.new_features_rest, self.new_opacities,
-                                   self.new_scaling, self.new_rotation, self.new_trackable_mask)
+                                   self.new_scaling, self.new_rotation, self.new_trackable_mask, self.new_mask)
         new_keyframe_idx = torch.zeros((self.new_xyz.shape[0], self.keyframe_idx.shape[1]), device="cuda",
                                        dtype=torch.bool)
         # Expanding keyframe_idx table
@@ -222,7 +233,9 @@ class GaussianModel(nn.Module):
             {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
             {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
-            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
+            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
+            # 新增mask的优化器
+            {'params': [self._mask], 'lr': training_args.mask_lr, "name": "mask"}
         ]
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
@@ -432,6 +445,8 @@ class GaussianModel(nn.Module):
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
+        # 更新mask
+        self._mask = optimizable_tensors["mask"]
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
 
@@ -471,13 +486,14 @@ class GaussianModel(nn.Module):
         return optimizable_tensors
 
     def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling,
-                              new_rotation, new_trackable_mask):
+                              new_rotation, new_trackable_mask, new_mask):
         d = {"xyz": new_xyz,
              "f_dc": new_features_dc,
              "f_rest": new_features_rest,
              "opacity": new_opacities,
              "scaling": new_scaling,
-             "rotation": new_rotation}
+             "rotation": new_rotation,
+             "mask": new_mask}
 
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
         self._xyz = optimizable_tensors["xyz"]
@@ -486,6 +502,7 @@ class GaussianModel(nn.Module):
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
+        self._mask = optimizable_tensors["mask"]
 
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -517,9 +534,10 @@ class GaussianModel(nn.Module):
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N, 1, 1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N, 1)
         new_trackable_mask = self.trackable_mask[selected_pts_mask].repeat(N)
+        new_mask = self._mask[selected_pts_mask].repeat(N, 1)
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation,
-                                   new_trackable_mask)
+                                   new_trackable_mask, new_mask)
 
         prune_filter = torch.cat(
             (selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
@@ -544,8 +562,10 @@ class GaussianModel(nn.Module):
         new_rotation = self._rotation[selected_pts_mask]
         new_trackable_mask = self.trackable_mask[selected_pts_mask]
 
+        new_mask = self._mask[selected_pts_mask]
+
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling,
-                                   new_rotation, new_trackable_mask)
+                                   new_rotation, new_trackable_mask, new_mask)
         # torch.cuda.empty_cache()
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
@@ -559,7 +579,8 @@ class GaussianModel(nn.Module):
         self.densify_and_split(grads, max_grad, extent)
         # torch.cuda.empty_cache()
 
-        prune_mask = (self.get_opacity < min_opacity).squeeze()
+        prune_mask = torch.logical_or((torch.sigmoid(self._mask) <= 0.01).squeeze(),
+                                      (self.get_opacity < min_opacity).squeeze())
         if max_screen_size:
             big_points_vs = self.max_radii2D > max_screen_size
             if extent != None:
@@ -642,3 +663,13 @@ class GaussianModel(nn.Module):
         elements[:] = list(map(tuple, attributes))
         el = PlyElement.describe(elements, 'vertex')
         PlyData([el]).write(path)
+
+    def mask_prune(self):
+        # 这部分是在no_grad下进行的，对应了论文中的公式1
+        prune_mask = (torch.sigmoid(self._mask) <= 0.01).squeeze()
+        self.prune_points(prune_mask)
+        torch.cuda.empty_cache()
+
+    @property
+    def mask(self):
+        return self._mask

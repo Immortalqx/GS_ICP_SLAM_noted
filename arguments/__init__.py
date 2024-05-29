@@ -25,7 +25,7 @@ class ParamGroup:
                 shorthand = True
                 key = key[1:]
             t = type(value)
-            value = value if not fill_none else None 
+            value = value if not fill_none else None
             if shorthand:
                 if t == bool:
                     group.add_argument("--" + key, ("-" + key[0:1]), default=value, action="store_true")
@@ -44,7 +44,7 @@ class ParamGroup:
                 setattr(group, arg[0], arg[1])
         return group
 
-class ModelParams(ParamGroup): 
+class ModelParams(ParamGroup):
     def __init__(self, parser, sentinel=False):
         self.sh_degree = 3
         self._source_path = ""
@@ -86,7 +86,10 @@ class OptimizationParams(ParamGroup):
         self.densify_from_iter = 300    #500
         self.densify_until_iter = 15_000
         self.densify_grad_threshold = 0.0002 # 0.0002
-        
+
+        # for mask
+        self.mask_lr = 0.01
+
         # for slam
         self.per_frame_iteration = 1
         self.downsample_rate = 10
@@ -94,7 +97,7 @@ class OptimizationParams(ParamGroup):
         self.max_correspondence_distance = 0.05
         self.keyframe_freq = 30
         self.train = True
-        
+
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):
@@ -130,12 +133,12 @@ class SLAMParameters():
         self.white_background = False
         self.data_device = "cuda"
         self.eval = False
-        
+
         ## Pipeline parameters ##
         self.convert_SHs_python = False
         self.compute_cov3D_python = False
         self.debug = False
-        
+
         ## Optimization parameters ##
         self.iterations = 30_000
         self.position_lr_init = 0.0000016 # 0.0000016
@@ -153,7 +156,10 @@ class SLAMParameters():
         self.densify_from_iter = 300    #500
         self.densify_until_iter = 15_000
         self.densify_grad_threshold = 0.0002 # 0.0002
-        
+
+        # for mask
+        self.mask_lr = 0.01
+
         # for slam
         self.per_frame_iteration = 1
         # self.downsample_rate = 10       # tum:5, replica:10
