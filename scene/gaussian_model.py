@@ -646,6 +646,8 @@ class GaussianModel(nn.Module):
         self.denom[update_filter] += 1
 
     def save_ply(self, path):
+        self.mask_prune()
+
         mkdir_p(os.path.dirname(path))
 
         xyz = self._xyz.detach().cpu().numpy()
@@ -665,10 +667,9 @@ class GaussianModel(nn.Module):
         PlyData([el]).write(path)
 
     def mask_prune(self):
-        # 这部分是在no_grad下进行的，对应了论文中的公式1
         prune_mask = (torch.sigmoid(self._mask) <= 0.01).squeeze()
         self.prune_points(prune_mask)
-        torch.cuda.empty_cache()
+        # torch.cuda.empty_cache()
 
     @property
     def mask(self):

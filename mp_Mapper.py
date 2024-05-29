@@ -238,14 +238,14 @@ class Mapper(SLAMParameters):
                 loss_d = Ll1_d
 
                 loss_mask = torch.mean((torch.sigmoid(self.gaussians.mask)))
-                loss = loss_rgb + 0.1 * loss_d + 0.0005 * loss_mask
+                loss = loss_rgb + 0.1 * loss_d + 0.05 * loss_mask
 
                 loss.backward()
                 with torch.no_grad():
                     if self.train_iter % 200 == 0:  # 200
                         self.gaussians.prune_large_and_transparent(0.005, self.prune_th)
 
-                    if self.train_iter % 1000 == 0:
+                    if self.train_iter % 200 == 0:
                         self.gaussians.mask_prune()
 
                     self.gaussians.optimizer.step()
